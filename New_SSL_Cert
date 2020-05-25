@@ -1,0 +1,119 @@
+<#
+.SYNOPSIS
+  <Standard SSL Certificate generation from Entrust Portal using API calls>
+.DESCRIPTION
+  <Certificate name is taken as input and a new Entrust Certificate is generated for 1 year validity from the day this script is invoked.>
+.NOTES
+  Version:        1.0
+  Creation Date:  05/12/2020
+  Purpose/Change: Initial Script for Entrust Certificate generation
+#>
+
+#Script Version = "1.0"
+
+#Variable Initialization
+$Today_Date = (Get-Date).ToString("yyyMMdd")
+$CNAME_DATE = $env:CERTIFICATE_NAME + $Today_Date
+New-Item -ItemType Directory -Force -Path "C:\NewSSLCerts\$CNAME_DATE"
+New-Item -ItemType Directory -Force -Path "C:\Program Files (x86)\Jenkins\workspace\New Entrust Standard SSL Certificate Request\$env:BUILD_NUMBER"
+$KEYFILE = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.key"
+$CSRFILE = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.csr"
+$MOD_CSRFILE = "C:\NewSSLCerts\$CNAME_DATE\MOD_$CNAME_DATE.csr"
+$CERTFILE_PATH = "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt"
+$Cert_Expiry_Date = (Get-Date).AddDays(+365).ToString("yyyy-MM-dd")
+$time = "T03:00:00Z"
+$CERT_EXP_DATE = $Cert_Expiry_Date + $time
+$RestError = $null
+$response = $null
+
+
+#Set Envionment path for Git CLI
+$env:path = $env:path + ";C:\Program Files\Git\usr\bin"
+
+#Generate CSR and KEY files using Openssl command
+Invoke-Expression "openssl req -nodes -newkey rsa:2048 -keyout $KEYFILE -out $CSRFILE -subj '/C=US/ST=CA/L=Burbank/O=Rajesh Properties/OU=IT/CN=$env:CERTIFICATE_NAME'"
+(Get-Content $CSRFILE) -join '' | Set-Content $MOD_CSRFILE
+$CSR_FILE_INSERT = Get-Content $MOD_CSRFILE
+
+
+#Headers for Entrust API Call
+$pair = "$($ENV:Entrust_User):$($ENV:Entrust_Password)"
+$encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
+$basicAuthValue = "Basic $encodedCreds"
+$headers = @{
+    Authorization = $basicAuthValue
+}
+
+
+$body = "{
+`n    `"csr`":  `"$CSR_FILE_INSERT`\r`\n`",
+`n	`"certExpiryDate`":	`"$CERT_EXP_DATE`",
+`n	`"certType`":		`"STANDARD_SSL`",
+`n	`"ctLog`":	`"false`",
+`n	`"tracking`": {
+`n		`"trackingInfo`": `"REST API from Jenkins Powershell Script`",
+`n		`"requesterName`": `"Jenkins triggering Script using Powershell REST API`",
+`n		`"requesterPhone`": `"801-980-1470`",
+`n		`"requesterEmail`": `"L2_network@ep.com`"
+`n	},
+`n	`"signingAlg`": `"SHA-2`",
+`n	`"clientId`":	`"1`"
+`n}"
+
+$API_SSL_CERT = "C:\NewSSLCerts\DONOTDELETE\rdcsslcert.pfx"
+
+#Set the SSL Client version to TLs1.2 for secure communication
+[Net.ServicePointManager]::SecurityProtocol = "tls12"
+
+#try and catch block for error handling and generating certificate and storing it in local file.
+try {
+	$response = Invoke-RestMethod 'https://api.entrust.net/enterprise/v2/certificates' -Method 'POST' -Headers $headers -Body $body -Certificate $API_SSL_CERT -ContentType "application/json"
+	$Final_Cert = $response.endEntityCert | ConvertTo-Json
+	$Final_Cert_Expiry_Date = $response.expiresAfter
+
+	$response | ConvertTo-Json | Out-File "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.json"
+
+	$Cert_Files = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.json"
+	$Entrust_Cert_Out = Get-Content -Path $Cert_Files | ConvertFrom-Json
+	$Server_Certificate = $Entrust_Cert_Out.endEntityCert
+	$Tracking_ID_Certificate = $Entrust_Cert_Out.trackingId
+	$Expir_Date_Certificate = $Entrust_Cert_Out.expiresAfter
+	$Picku_URL_Certificate = $Entrust_Cert_Out.pickupUrl
+	$Chain_Certificate = $Entrust_Cert_Out.chainCerts
+
+	$Server_Certificate | Out-File "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt"
+
+	Write-Host " Certificate File can be found on the server at this Path $CERTFILE_PATH "
+
+	Write-Host "Certificate Expiry Date: $Expir_Date_Certificate"
+    
+    Write-Host "Tracking ID is : $Tracking_ID_Certificate"
+
+  	Copy-Item "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt" -Destination "C:\Program Files (x86)\Jenkins\workspace\New Entrust Standard SSL Certificate Request\$env:BUILD_NUMBER\"
+	$Down_url = "http://rajeshp.in/view/Network/job/New Entrust Standard SSL Certificate Request/ws/$env:BUILD_NUMBER/$env:CERTIFICATE_NAME.crt"
+  	Write-Host "SSL Certificate for $env:CERTIFICATE_NAME Download link is : $Down_url "
+
+
+}
+catch {
+	$RestError = $_
+
+	if ($RestError -match "Could not create SSL/TLS secure channel")
+	{
+		#The request was aborted: Could not create SSL/TLS secure channel
+		Write-Host "The below error is caused due to SSL Version mismatch in communication or the certificate issued in use for API connection"
+		Write-Host "Error Message: $RestError"
+	}
+	elseif ($RestError -match "Authorization header not found")
+	{
+		#Error Message: {"status":401,"errors":[{"message":"Authorization header not found."}]}
+		Write-Host "The below error is caused as the headers are missing in the invoke command or the credentials in header is expired"
+		Write-Host "Error Message: $RestError"
+	}
+	else
+	{
+		Write-Host "Please check the below error message and fix it to generate the certificate"
+		Write-Host "Error Message: $RestError"
+	}
+
+}
