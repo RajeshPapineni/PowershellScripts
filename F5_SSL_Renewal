@@ -1,0 +1,390 @@
+function Format-AnsiColor {
+	[CmdletBinding()]
+	[OutputType([string])]
+	param(
+		[Parameter(
+			Mandatory = $true,
+			ValueFromPipeline = $true
+		)]
+		[AllowEmptyString()]
+		[string]
+		$Message,
+
+		[Parameter()]
+		[ValidateSet(
+			'normal display'
+			,'bold'
+			,'underline (mono only)'
+			,'blink on'
+			,'reverse video on'
+			,'nondisplayed (invisible)'
+		)]
+		[Alias('attribute')]
+		[string]
+		$Style,
+
+		[Parameter()]
+		[ValidateSet(
+			'black'
+			,'red'
+			,'green'
+			,'yellow'
+			,'blue'
+			,'magenta'
+			,'cyan'
+			,'white'
+		)]
+		[Alias('fg')]
+		[string]
+		$ForegroundColor,
+
+		[Parameter()]
+		[ValidateSet(
+			'black'
+			,'red'
+			,'green'
+			,'yellow'
+			,'blue'
+			,'magenta'
+			,'cyan'
+			,'white'
+		)]
+		[Alias('bg')]
+		[string]
+		$BackgroundColor
+	)
+
+	begin {
+		$e = [char]27
+
+		$attrib = @{
+			'normal display' = 0
+			'bold' = 1
+			'underline (mono only)' = 4
+			'blink on' = 5
+			'reverse video on' = 7
+			'nondisplayed (invisible)' = 8
+		}
+
+		$fore = @{
+			black = 30
+			red = 31
+			green = 32
+			yellow = 33
+			blue = 34
+			magenta = 35
+			cyan = 36
+			white = 37
+		}
+
+		$back = @{
+			black = 40
+			red = 41
+			green = 42
+			yellow = 43
+			blue = 44
+			magenta = 45
+			cyan = 46
+			white = 47
+		}
+	}
+
+	process {
+		$formats = @()
+		if ($Style) {
+			$formats += $attrib[$Style]
+		}
+		if ($ForegroundColor) {
+			$formats += $fore[$ForegroundColor]
+		}
+		if ($BackgroundColor) {
+			$formats += $back[$BackgroundColor]
+		}
+		if ($formats) {
+			$formatter = "$e[$($formats -join ';')m"
+		}
+
+		"$formatter$_"
+	}
+}
+
+
+function Port_to_Protocol
+{
+	param([string]$Port_Number)
+	switch ($Port_Number)
+	{
+		443 { "https" }
+		80 { "http" }
+		22 { "ssh" }
+		21 { "ftp" }
+		23 { "telnet" }
+		1723 { "pptp" }
+		25 { "smtp" }
+		161 { "snmp" }
+		162 { "snmp-trap" }
+		69 { "tftp" }
+		1610 { "taurus-wh" }
+		1611 { "ill" }
+		143 { "imap" }
+		993 { "imaps" }
+		5432 { "postgres" }
+		0 { "any" }
+		8080 { "webcache" }
+		139 { "netbios-ssn" }
+		445 { "microsoft-ds" }
+		137 { "netbios-ns" }
+		389 { "ldap" }
+		636 { "ldaps" }
+		3268 { "msft-gc" }
+		9999 { "distinct" }
+		3269 { "msft-gc-ssl" }
+		5044 { "lxi-evntsvc" }
+		5055 { "unot" }
+		9200 { "wap-wsp" }
+		5060 { "sip" }
+		5061 { "sip-tls" }
+		9080 { "glrpc" }
+		3000 { "hbci" }
+		5000 { "commplex-main" }
+		9000 { "cslistener" }
+		587 { "submission" }
+		default { "$Port_Number" }
+	}
+}
+
+
+function Environment_Details
+{
+	param([string]$ENV:Location_Name)
+	switch ($ENV:Location_Name)
+	{
+		RDC { "172.30.50.4" }
+		CDC { "172.19.30.21" }
+		IDC { "172.30.0.32" }
+		#default {"NO INFO"}
+	}
+}
+
+
+$Protocol = Port_to_Protocol ($ENV:Port_Number)
+$IPAddress_service = $ENV:IP_Address + ':' + $Protocol
+$Today_Date = (Get-Date).ToString("yyyMMdd")
+$CNAME_DATE = $env:CERTIFICATE_NAME + '_' + $Today_Date
+New-Item -ItemType Directory -Force -Path "C:\NewSSLCerts\$CNAME_DATE"
+$KEYFILE = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.key"
+$CSRFILE = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.csr"
+$MOD_CSRFILE = "C:\NewSSLCerts\$CNAME_DATE\MOD_$CNAME_DATE.csr"
+$CERTFILE_PATH = "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt"
+$MOD_CERTIFICATE_NAME = "C:\NewSSLCerts\$CNAME_DATE\MOD_$env:CERTIFICATE_NAME.crt"
+$F5_LB_IP = Environment_Details ("$env:Location_Name")
+$RestError = $null
+$response = $null
+
+##Need to get Certificate using the MOD_CSR file generated from Entrust using API commands
+$Cert_Expiry_Date = (Get-Date).AddDays(+365).ToString("yyyy-MM-dd")
+$time = "T03:00:00Z"
+$CERT_EXP_DATE = $Cert_Expiry_Date + $time
+
+$F5_Password = ConvertTo-SecureString "$($env:F5_pass)" -AsPlainText -Force
+$F5_credential = New-Object System.Management.Automation.PSCredential ("$env:F5_user",$F5_Password)
+
+function Load_balancer_HA
+{
+
+	# Connect to F5 load balancer 
+	New-SSHSession -ComputerName $F5_LB_IP -Credential $F5_credential -AcceptKey:$true
+
+	#HA Status of the F5 load balancer
+	$Device_Status = Invoke-SSHCommand -Index 0 -Command "tmsh show /cm failover-status"
+	$HA_Status = $Device_Status.Output | Select-String -Pattern "ACTIVE" -CaseSensitive
+	if ($HA_Status -cmatch "ACTIVE")
+	{
+
+		"This device is the Active F5 Load balancer" | Format-AnsiColor -Style 'normal display' -ForegroundColor Green
+		$HA_Status | Format-AnsiColor -ForegroundColor Green
+
+	}
+	else
+	{
+		Write-Host "This device is the Standby F5 Load balancer" | Format-AnsiColor -Style 'normal display' -ForegroundColor Red
+
+		$HA_Status | Format-AnsiColor -ForegroundColor Red
+
+	}
+
+}
+
+function Gen_Cert
+{
+
+	#Set the Git Environment path
+	$env:path = $env:path + ";C:\Program Files\Git\usr\bin"
+
+	#Run OpenSSL command to generate the CSR and KEY files
+	Invoke-Expression "openssl req -nodes -newkey rsa:2048 -keyout $KEYFILE -out $CSRFILE -subj '/C=US/ST=CA/L=Burbank/O=DISC Intellectual Properties/OU=IT/CN=$env:CERTIFICATE_NAME'"
+	(Get-Content $CSRFILE) -join '' | Set-Content $MOD_CSRFILE
+	
+  	$CSR_FILE_INSERT = Get-Content $MOD_CSRFILE
+	
+  	#Headers for authentication and content type  
+	$pair = "$($ENV:Entrust_User):$($ENV:Entrust_Password)"
+	$encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
+	$basicAuthValue = "Basic $encodedCreds"
+	$headers = @{
+    Authorization = $basicAuthValue
+	}
+
+
+  	$body = "{
+  	`n    `"csr`":  `"$CSR_FILE_INSERT`\r`\n`",
+  	`n	`"certExpiryDate`":	`"$CERT_EXP_DATE`",
+  	`n	`"certType`":		`"STANDARD_SSL`",
+  	`n	`"ctLog`":	`"true`",
+  	`n	`"tracking`": {
+  	`n		`"trackingInfo`": `"REST API from Jenkins Powershell Script`",
+  	`n		`"requesterName`": `"Jenkins triggering Script using Powershell REST API`",
+  	`n		`"requesterPhone`": `"801-980-1470`",
+  	`n		`"requesterEmail`": `"L2_network@ep.com`"
+  	`n	},
+  	`n	`"signingAlg`": `"SHA-2`",
+  	`n	`"clientId`":	`"1`"
+  	`n}"
+
+	$API_SSL_CERT = "C:\NewSSLCerts\DONOTDELETE\rdcsslcert.pfx"
+
+	#Set the SSL Client version to TLs1.2 for secure communication
+	[Net.ServicePointManager]::SecurityProtocol = "tls12"
+
+	try {
+		$response = Invoke-RestMethod 'https://api.entrust.net/enterprise/v2/certificates' -Method 'POST' -Headers $headers -Body $body -Certificate $API_SSL_CERT -ContentType "application/json"
+		$Final_Cert = $response.endEntityCert | ConvertTo-Json
+		$Final_Cert_Expiry_Date = $response.expiresAfter
+
+		$response | ConvertTo-Json | Out-File "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.json"
+
+		$Cert_Files = "C:\NewSSLCerts\$CNAME_DATE\$CNAME_DATE.json"
+		$Entrust_Cert_Out = Get-Content -Path $Cert_Files | ConvertFrom-Json
+		$Server_Certificate = $Entrust_Cert_Out.endEntityCert
+		$Tracking_ID_Certificate = $Entrust_Cert_Out.trackingId
+		$Expir_Date_Certificate = $Entrust_Cert_Out.expiresAfter
+		$Picku_URL_Certificate = $Entrust_Cert_Out.pickupUrl
+		$Chain_Certificate = $Entrust_Cert_Out.chainCerts
+
+		$Server_Certificate | Out-File "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt"
+
+		Write-Host " Certificate File can be found on the server at this Path $CERTFILE_PATH "
+
+		Write-Host "Certificate Expiry Date: $Expir_Date_Certificate"
+    
+	    Write-Host "Tracking ID is : $Tracking_ID_Certificate"
+
+      	Get-Content "C:\NewSSLCerts\$CNAME_DATE\$env:CERTIFICATE_NAME.crt" | ? {$_.trim() -ne "" } | Set-Content $MOD_CERTIFICATE_NAME
+      	
+      	$global:CERTFILE = $MOD_CERTIFICATE_NAME
+
+	}
+	catch {
+		$RestError = $_
+
+		if ($RestError -match "Could not create SSL/TLS secure channel")
+		{
+			#The request was aborted: Could not create SSL/TLS secure channel
+			Write-Host "The below error is caused due to SSL Version mismatch in communication or the certificate issued in use for API connection"
+			Write-Host "Error Message: $RestError"
+		}
+		elseif ($RestError -match "Authorization header not found")
+		{
+			#Error Message: {"status":401,"errors":[{"message":"Authorization header not found."}]}
+			Write-Host "The below error is caused as the headers are missing in the invoke command or the credentials in header is expired"
+			Write-Host "Error Message: $RestError"
+		}
+		else
+		{
+			Write-Host "Please check the below error message and fix it to generate the certificate"
+			Write-Host "Error Message: $RestError"
+		}
+	}
+}
+
+function Cert_Renew
+{
+	# Copy certificate file to tmp folder on F5
+  
+	Set-SCPFile -ComputerName $F5_LB_IP -Credential $F5_credential -LocalFile $CERTFILE -RemotePath "/shared/tmp/"
+	Set-SCPFile -ComputerName $F5_LB_IP -Credential $F5_credential -LocalFile $KEYFILE -RemotePath "/shared/tmp/"
+
+	#Install Cert and Key files on the F5 load balancer
+	Invoke-SSHCommand -Index 0 -Command "tmsh install sys crypto key $CNAME_DATE.key from-local-file /shared/tmp/$CNAME_DATE.key"
+	Invoke-SSHCommand -Index 0 -Command "tmsh install sys crypto cert $CNAME_DATE.crt from-local-file /shared/tmp/MOD_$env:CERTIFICATE_NAME.crt"
+
+	# Verify the cert info by the following command:  list sys crypto cert rdcssltest.ep.com.crt
+	$Verify_Cert_file = Invoke-SSHCommand -Index 0 -Command "tmsh list sys crypto cert $CNAME_DATE.crt"
+	$Verify_Key_file = Invoke-SSHCommand -Index 0 -Command "tmsh list sys crypto key $CNAME_DATE.key"
+
+	$Verify_Cert_file.Output
+	$Verify_Key_file.Output
+
+	#Get the Virtual Server name in F5 load balancer using the IP Address and service
+	$virtu_comm = Invoke-SSHCommand -Index 0 -Command "tmsh list ltm virtual destination | grep -C 1 $IPAddress_service"
+
+	$Virtual_server_name = ($virtu_comm.Output[0] -replace "ltm virtual ","") -replace "{",""
+	$Virtual_server_name_trim = $Virtual_server_name.Trim()
+$Virtual_server_name_trim
+	#Get the SSL Client Profile details from Virtual Server
+	$all_virtual = Invoke-SSHCommand -Index 0 -Command "tmsh list /ltm virtual $Virtual_server_name_trim"
+	$Check_Profile = $all_virtual.Output | Select-String "context clientside"
+$Check_Profile
+	if ($Check_Profile -eq $null)
+	{
+		Write-Host " SSL Client Profile for this Virtual Server $Virtual_server_name_trim doesn't exist "
+	}
+	else
+	{
+		$Existing_Client_SSL_Profile = ((($all_virtual.Output | Select-String "context clientside" -Context 1).context.precontext)[0] -replace "{","").Trim()
+		$Existing_Client_SSL_Profile_trim = $Existing_Client_SSL_Profile.Trim()
+$Existing_Client_SSL_Profile_trim
+		## Create new SSL Client profile and link the cert, key, Chain and CA Root files
+		$DC_Key_File = $CNAME_DATE + ".key"
+		$DC_Cert_File = $CNAME_DATE + ".crt"
+		$CNAME_DATE_Profile = $CNAME_DATE + '_' + "Profile"
+		$CNAME_DATE_profile_certkey = $CNAME_DATE + '_' + "profile_certkey"
+$CNAME_DATE_profile_certkey      
+		Invoke-SSHCommand -Index 0 -Command "tmsh create ltm profile client-ssl $CNAME_DATE_Profile defaults-from clientssl cert-key-chain add { $CNAME_DATE_profile_certkey { cert $DC_Cert_File chain $Existing_Chain_Cert key $DC_Key_File } } ca-file $Existing_CA_File "
+		#tmsh create ltm profile client-ssl support-dr.ep.com_20200510_Profile defaults-from clientssl cert-key-chain add { support-dr.ep.com_20200510_profile_certkey { cert support-dr.ep.com_20200510.crt chain Entrust-Chain_Bundle.crt key support-dr.ep.com_20200510.key } } ca-file Entrust-2048-Root.crt }
+
+
+		## Need to link the profile to virtual server 
+		Invoke-SSHCommand -Index 0 -Command "tmsh modify ltm virtual $Virtual_server_name_trim profiles replace-all-with  { $CNAME_DATE_Profile }"
+
+		# Save configuration: save sys config
+		Invoke-SSHCommand -Index 0 -Command "tmsh save /sys config"
+
+		#Clear the SSH Sessions after the renewal is completed.
+		Remove-SSHSession -SessionId 0
+	}
+}
+
+&Load_balancer_HA
+
+if ($ENV:Location_Name -eq "RDC")
+{
+	$global:Existing_Chain_Cert = "Entrust-Chain_Bundle.crt"
+	$global:Existing_CA_File = "Entrust-2048-Root.crt"
+	&Gen_Cert
+	&Cert_Renew
+}
+elseif ($ENV:Location_Name -eq "CDC")
+{
+	$global:Existing_Chain_Cert = "Entrust-L1C-ChainRoot-and-Chain.crt"
+	$global:Existing_CA_File = "Entrust-CA-2048-Root.crt"
+	&Gen_Cert
+	&Cert_Renew
+}
+else
+{
+	$global:Existing_Chain_Cert = "Entrust-L1C-ChainRoot-and-Chain.crt"
+	$global:Existing_CA_File = "150421_ENTRUST-2048-ROOT_FOR-SHA-2.crt"
+	&Gen_Cert
+	&Cert_Renew
+}
